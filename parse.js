@@ -461,7 +461,7 @@ function inline(s, refs) {
     const c = s[i];
     // backslash escape / hard break
     if (c === '\\') {
-      if (s[i + 1] === '\n') { atoms.push({ k: 'h', s: '<br />\n' }); i += 2; continue; }
+      if (s[i + 1] === '\n') { atoms.push({ k: 'h', s: '<br>' }); i += 2; continue; }
       if (i + 1 < n && PUNCT.test(s[i + 1])) { addText(s[i + 1]); i += 2; continue; }
       addText('\\'); i++; continue;
     }
@@ -548,7 +548,7 @@ function inline(s, refs) {
         const m = / +$/.exec(last.s);
         if (m && m[0].length >= 2) {
           last.s = last.s.slice(0, -m[0].length);
-          atoms.push({ k: 'h', s: '<br />\n' });
+          atoms.push({ k: 'h', s: '<br>' });
           i++; continue;
         }
       }
@@ -679,31 +679,45 @@ function tryDef(lines, i, refs) {
   if (!d) return -1;
   let title;
   let endPos = d.next;
+  let destLines = 1;
+  for (let x = 0; x < d.next; x++) if (joined[x] === '\n') destLines++;
+  let titleAttempted = false;
   let r = d.next;
   while (r < joined.length && (joined[r] === ' ' || joined[r] === '\t')) r++;
-  if (r < joined.length && joined[r] !== '\n') {
+  const wsBefore = r > d.next; // a title must be separated from the dest by whitespace
+  if (wsBefore && r < joined.length && joined[r] !== '\n' &&
+      (joined[r] === '"' || joined[r] === "'" || joined[r] === '(')) {
+    titleAttempted = true;
     const t = parseTitle(joined, r);
-    if (!t) return -1;
-    title = t.title;
-    endPos = t.next;
-    r = t.next;
-    while (r < joined.length && (joined[r] === ' ' || joined[r] === '\t')) r++;
-    if (r < joined.length && joined[r] !== '\n') return -1;
+    if (!t) return -1; // a title on the destination's own line that cannot
+    // be parsed invalidates the whole definition
+    let r2 = t.next;
+    while (r2 < joined.length && (joined[r2] === ' ' || joined[r2] === '\t')) r2++;
+    if (r2 < joined.length && joined[r2] !== '\n') return -1;
+    title = t.title; endPos = t.next;
   } else if (joined[r] === '\n') {
     let r2 = r + 1;
     while (r2 < joined.length && (joined[r2] === ' ' || joined[r2] === '\t')) r2++;
     if (r2 < joined.length && (joined[r2] === '"' || joined[r2] === "'" || joined[r2] === '(')) {
+      titleAttempted = true;
       const t = parseTitle(joined, r2);
-      if (!t) return -1;
-      let r3 = t.next;
-      while (r3 < joined.length && (joined[r3] === ' ' || joined[r3] === '\t')) r3++;
-      if (r3 < joined.length && joined[r3] !== '\n') return -1;
-      title = t.title;
-      endPos = t.next;
+      if (t) {
+        let r3 = t.next;
+        while (r3 < joined.length && (joined[r3] === ' ' || joined[r3] === '\t')) r3++;
+        if (r3 >= joined.length || joined[r3] === '\n') { title = t.title; endPos = t.next; }
+        // trailing junk after a title: fall back to the destination alone
+      }
     }
+  }
+  if (!titleAttempted) {
+    // no title: only whitespace may follow the destination on its line
+    let e = d.next;
+    while (e < joined.length && (joined[e] === ' ' || joined[e] === '\t')) e++;
+    if (e < joined.length && joined[e] !== '\n') return -1;
   }
   let consumed = 1;
   for (let x = 0; x < endPos; x++) if (joined[x] === '\n') consumed++;
+  if (endPos === d.next) consumed = destLines;
   if (!refs.has(norm)) refs.set(norm, { dest: d.dest, title });
   return i + consumed;
 }
@@ -908,8 +922,10 @@ function collectQuote(lines, i, b) {
     if (isBlankLine(line)) break;
     // lazy continuation: merge into the open paragraph line (a lazy line is
     // paragraph text, never a new block — e.g. a list marker below the
-    // content column must not become a phantom nested list)
-    if (sub.length > 0 && isParaLine(sub[sub.length - 1])) { sub[sub.length - 1] += '\n' + line; j++; continue; }
+    // content column must not become a phantom nested list). The candidate
+    // itself must be paragraph continuation text: never a setext underline,
+    // fence, heading, hr, quote, or HTML block start.
+    if (sub.length > 0 && isParaLine(sub[sub.length - 1]) && setextUnderline(line) === 0 && (isParaLine(line) || listMarker(line))) { sub[sub.length - 1] += '\n' + line; j++; continue; }
     break;
   }
   return { sub, next: j };
