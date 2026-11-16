@@ -103,20 +103,17 @@ function indentOf(l) {
   }
   return col;
 }
-// strip up to n columns of leading whitespace; a tab straddling the
-// boundary is replaced by the remaining spaces
-function stripCols(l, n) {
-  let col = 0, i = 0;
-  while (i < l.length && col < n) {
-    const c = l[i];
-    if (c === ' ') { col++; i++; }
-    else if (c === '\t') {
-      const w = 4 - (col % 4);
-      if (col + w <= n) { col += w; i++; }
-      else { return ' '.repeat(col + w - n) + l.slice(i + 1); }
-    } else break;
+// strip n columns of leading whitespace. A tab's width depends on its
+// absolute column, so the leading whitespace is first expanded to spaces
+// (using absolute columns from startCol) and only then cut; otherwise a
+// tab kept past the cut would change width and corrupt the indent.
+function stripCols(l, n, startCol = 0) {
+  let col = startCol, i = 0, spaces = '';
+  while (i < l.length && (l[i] === ' ' || l[i] === '\t')) {
+    if (l[i] === ' ') { col++; spaces += ' '; i++; }
+    else { const w = 4 - (col % 4); col += w; spaces += ' '.repeat(w); i++; }
   }
-  return l.slice(i);
+  return spaces.slice(n) + l.slice(i);
 }
 // case-fold + collapse whitespace, per CommonMark link-label normalization
 function normalizeLabel(s) {
@@ -336,10 +333,12 @@ function tryLink(s, b, isImage, refs) {
       const norm = normalizeLabel(label);
       const ref = norm !== '' && norm.length <= 999 ? refs.get(norm) : undefined;
       if (ref) { dest = ref.dest; title = ref.title; k = e + 1; }
+      else return null; // explicit label given but not defined: no shortcut
     }
   }
   if (dest === undefined) {
-    // shortcut reference: the link text is the label
+    // shortcut reference: the link text is the label (reached only when no
+    // '(' inline link and no '[label]' were attempted, or the inline failed)
     if (text === '') return null;
     const norm = normalizeLabel(text);
     if (norm === '' || norm.length > 999) return null;
@@ -356,7 +355,7 @@ function tryLink(s, b, isImage, refs) {
     if (href === null) return { html: alt, next: k, isLink: false };
     return {
       html: '<img src="' + escAttr(href) + '" alt="' + alt + '"' +
-        (title !== undefined ? ' title="' + escAttr(resolveEscapesEntities(title)) + '"' : '') + ' />',
+        (title !== undefined ? ' title="' + escAttr(resolveEscapesEntities(title)) + '"' : '') + '>',
       next: k, isLink: false,
     };
   }
@@ -640,7 +639,9 @@ function inline(s, refs) {
 const BLOCK_TAGS = new Set(['address', 'article', 'aside', 'base', 'basefont', 'blockquote', 'body', 'caption', 'center', 'col', 'colgroup', 'dd', 'details', 'dialog', 'dir', 'div', 'dl', 'dt', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'frame', 'frameset', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header', 'hr', 'html', 'iframe', 'legend', 'li', 'link', 'main', 'menu', 'menuitem', 'nav', 'noframes', 'ol', 'optgroup', 'option', 'p', 'param', 'section', 'source', 'summary', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'title', 'tr', 'track', 'ul']);
 
 // try to parse a link reference definition starting at lines[i].
-// Returns the index after the definition, or -1.
+// Returns the index after the definition, or -1. The destination may sit
+// on the next line and the title may span several lines, so the definition
+// is parsed from the following lines joined with '\n'.
 function tryDef(lines, i, refs) {
   const line = lines[i];
   const ind = indentOf(line);
@@ -657,46 +658,50 @@ function tryDef(lines, i, refs) {
   if (j >= s.length || s[j] !== ']' || s[j + 1] !== ':') return -1;
   const norm = normalizeLabel(s.slice(1, j));
   if (norm === '' || norm.length > 999) return -1;
-  let rest = s.slice(j + 2);
-  let k = i;
-  let p = 0;
-  while (p < rest.length && (rest[p] === ' ' || rest[p] === '\t')) p++;
-  if (p >= rest.length) {
-    if (k + 1 >= lines.length) return -1;
-    const nl = lines[k + 1];
-    if (isBlankLine(nl) || indentOf(nl) > 3) return -1;
-    rest = stripCols(nl, indentOf(nl));
+  let joined = s.slice(j + 2);
+  let k = i + 1, count = 1;
+  while (k < lines.length && count < 12 && !isBlankLine(lines[k])) {
+    joined += '\n' + lines[k];
+    count++;
     k++;
-    p = 0;
-    while (p < rest.length && (rest[p] === ' ' || rest[p] === '\t')) p++;
-    if (p >= rest.length) return -1;
   }
-  const d = parseDest(rest, p);
+  let p = 0;
+  while (p < joined.length && (joined[p] === ' ' || joined[p] === '\t')) p++;
+  if (joined[p] === '\n') {
+    p++;
+    while (p < joined.length && (joined[p] === ' ' || joined[p] === '\t')) p++;
+  }
+  const d = parseDest(joined, p);
   if (!d) return -1;
-  const dest = d.dest;
-  let q = skipWs(rest, d.next);
   let title;
-  if (q < rest.length) {
-    const t = parseTitle(rest, q);
+  let endPos = d.next;
+  let r = d.next;
+  while (r < joined.length && (joined[r] === ' ' || joined[r] === '\t')) r++;
+  if (r < joined.length && joined[r] !== '\n') {
+    const t = parseTitle(joined, r);
     if (!t) return -1;
     title = t.title;
-    q = skipWs(rest, t.next);
-    if (q < rest.length) return -1;
-  } else if (k + 1 < lines.length) {
-    const nl = lines[k + 1];
-    if (!isBlankLine(nl) && indentOf(nl) <= 3) {
-      const r2 = stripCols(nl, indentOf(nl));
-      let p2 = 0;
-      while (p2 < r2.length && (r2[p2] === ' ' || r2[p2] === '\t')) p2++;
-      const t = parseTitle(r2, p2);
-      if (t) {
-        const q2 = skipWs(r2, t.next);
-        if (q2 >= r2.length) { title = t.title; k++; }
-      }
+    endPos = t.next;
+    r = t.next;
+    while (r < joined.length && (joined[r] === ' ' || joined[r] === '\t')) r++;
+    if (r < joined.length && joined[r] !== '\n') return -1;
+  } else if (joined[r] === '\n') {
+    let r2 = r + 1;
+    while (r2 < joined.length && (joined[r2] === ' ' || joined[r2] === '\t')) r2++;
+    if (r2 < joined.length && (joined[r2] === '"' || joined[r2] === "'" || joined[r2] === '(')) {
+      const t = parseTitle(joined, r2);
+      if (!t) return -1;
+      let r3 = t.next;
+      while (r3 < joined.length && (joined[r3] === ' ' || joined[r3] === '\t')) r3++;
+      if (r3 < joined.length && joined[r3] !== '\n') return -1;
+      title = t.title;
+      endPos = t.next;
     }
   }
-  if (!refs.has(norm)) refs.set(norm, { dest, title });
-  return k + 1;
+  let consumed = 1;
+  for (let x = 0; x < endPos; x++) if (joined[x] === '\n') consumed++;
+  if (!refs.has(norm)) refs.set(norm, { dest: d.dest, title });
+  return i + consumed;
 }
 
 // HTML block start: returns {type:1..7, endRe?, endStr?} or null
@@ -774,22 +779,9 @@ function isQuoteStart(line) {
 }
 
 // content after a marker: skip the marker, then consume up to `cols`
-// columns of whitespace (tab-aware, absolute columns; a straddling tab
-// leaves the remaining spaces in the content)
+// columns of whitespace (expanded to spaces at absolute columns)
 function afterMarker(s, ind, markerLen, cols) {
-  let col = ind + markerLen;
-  let i = markerLen;
-  const target = col + cols;
-  while (i < s.length && col < target) {
-    const c = s[i];
-    if (c === ' ') { col++; i++; }
-    else if (c === '\t') {
-      const w = 4 - (col % 4);
-      if (col + w <= target) { col += w; i++; }
-      else return ' '.repeat(col + w - target) + s.slice(i + 1);
-    } else break;
-  }
-  return s.slice(i);
+  return stripCols(s.slice(markerLen), cols, ind + markerLen);
 }
 function colWidthFrom(ws, startCol) {
   let col = startCol;
@@ -896,9 +888,7 @@ function collectQuote(lines, i, b) {
     const line = lines[j];
     const ind = indentOf(line);
     if (ind <= 3 && stripCols(line, ind).startsWith('>')) {
-      let rest = stripCols(line, ind).slice(1);
-      if (rest.startsWith(' ')) rest = rest.slice(1);
-      else if (rest.startsWith('\t')) rest = '   ' + rest.slice(1);
+      const rest = stripCols(stripCols(line, ind).slice(1), 1, ind + 1);
       sub.push(rest);
       j++;
       continue;
