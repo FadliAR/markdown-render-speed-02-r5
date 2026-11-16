@@ -292,8 +292,14 @@ function scanLinkText(s, j) {
   return null;
 }
 
+// marked's URL cleaning: encode, then restore already-encoded sequences
+function cleanUrl(href) {
+  try { return encodeURI(href).replace(/%25/g, '%'); } catch (e) { return null; }
+}
+
 // try to parse a link/image starting at bracket index b (s[b] === '[').
 // isImage: the '[' is preceded by '!'. Returns {html, next, isLink} or null.
+// A failed inline/full reference falls through to the shortcut reference.
 function tryLink(s, b, isImage, refs) {
   const lt = scanLinkText(s, b + 1);
   if (!lt) return null;
@@ -305,51 +311,56 @@ function tryLink(s, b, isImage, refs) {
     if (s[p] === ')') { dest = ''; k = p + 1; }
     else {
       const d = parseDest(s, p);
-      if (!d) return null;
-      dest = d.dest;
-      p = skipWs(s, d.next);
-      if (s[p] !== ')') {
-        const t = parseTitle(s, p);
-        if (!t) return null;
-        title = t.title;
-        p = skipWs(s, t.next);
+      if (d) {
+        let q = skipWs(s, d.next);
+        if (s[q] === ')') { dest = d.dest; k = q + 1; }
+        else {
+          const t = parseTitle(s, q);
+          if (t) {
+            const r = skipWs(s, t.next);
+            if (s[r] === ')') { dest = d.dest; title = t.title; k = r + 1; }
+          }
+        }
       }
-      if (s[p] !== ')') return null;
-      k = p + 1;
     }
-  } else {
-    let label;
-    if (s[k] === '[') {
-      let e = k + 1;
-      while (e < s.length && s[e] !== ']') {
-        if (s[e] === '\\' && e + 1 < s.length && PUNCT.test(s[e + 1])) e += 2;
-        else e++;
-      }
-      if (e >= s.length) return null;
+  }
+  if (dest === undefined && s[k] === '[') {
+    let e = k + 1;
+    while (e < s.length && s[e] !== ']') {
+      if (s[e] === '\\' && e + 1 < s.length && PUNCT.test(s[e + 1])) e += 2;
+      else e++;
+    }
+    if (e < s.length) {
       const raw = s.slice(k + 1, e);
-      label = raw === '' ? text : raw;
-      k = e + 1;
-    } else {
-      label = text;
+      const label = raw === '' ? text : raw;
+      const norm = normalizeLabel(label);
+      const ref = norm !== '' && norm.length <= 999 ? refs.get(norm) : undefined;
+      if (ref) { dest = ref.dest; title = ref.title; k = e + 1; }
     }
-    if (text === '' && label === '') return null;
-    const norm = normalizeLabel(label);
+  }
+  if (dest === undefined) {
+    // shortcut reference: the link text is the label
+    if (text === '') return null;
+    const norm = normalizeLabel(text);
     if (norm === '' || norm.length > 999) return null;
     const ref = refs.get(norm);
     if (!ref) return null;
     dest = ref.dest; title = ref.title;
+    k = lt.end + 1;
   }
-  const href = resolveEscapesEntities(dest);
+  const href = cleanUrl(resolveEscapesEntities(dest));
   const children = inline(text, refs);
   if (!isImage && children.hasLink) return null; // links cannot contain links
   if (isImage) {
     const alt = escAttr(resolveEscapesEntities(text));
+    if (href === null) return { html: alt, next: k, isLink: false };
     return {
       html: '<img src="' + escAttr(href) + '" alt="' + alt + '"' +
         (title !== undefined ? ' title="' + escAttr(resolveEscapesEntities(title)) + '"' : '') + ' />',
       next: k, isLink: false,
     };
   }
+  if (href === null) return { html: children.html, next: k, isLink: false };
   return {
     html: '<a href="' + escAttr(href) + '"' +
       (title !== undefined ? ' title="' + escAttr(resolveEscapesEntities(title)) + '"' : '') + '>' +
@@ -477,9 +488,11 @@ function inline(s, refs) {
       const rest = s.slice(i + 1);
       const am = /^([A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*)>/.exec(rest);
       if (am) {
-        const dest = resolveEscapesEntities(am[1]);
-        atoms.push({ k: 'h', s: '<a href="' + escAttr(dest) + '">' + esc(am[1]) + '</a>' });
-        hasLink = true; i += 1 + am[0].length; continue;
+        const dest = cleanUrl(resolveEscapesEntities(am[1]));
+        if (dest !== null) {
+          atoms.push({ k: 'h', s: '<a href="' + escAttr(dest) + '">' + esc(am[1]) + '</a>' });
+          hasLink = true; i += 1 + am[0].length; continue;
+        }
       }
       const em = /^([A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/.exec(rest);
       if (em) {
@@ -554,7 +567,7 @@ function inline(s, refs) {
       if (prev === undefined || isSpace(prev) || '*_~('.includes(prev)) {
         const url = scanExtUrl(s, i);
         if (url.length > 4 && validDomain(urlDomain(url))) {
-          atoms.push({ k: 'h', s: '<a href="' + escAttr('http://' + resolveEscapesEntities(url)) + '">' + esc(url) + '</a>' });
+          atoms.push({ k: 'h', s: '<a href="' + escAttr(cleanUrl('http://' + resolveEscapesEntities(url)) || '') + '">' + esc(url) + '</a>' });
           hasLink = true; i += url.length; continue;
         }
       }
@@ -575,7 +588,7 @@ function inline(s, refs) {
             last.s = last.s.slice(0, -scheme.length);
             if (last.s === '') atoms.pop();
           } else { addText(':'); i++; continue; }
-          atoms.push({ k: 'h', s: '<a href="' + escAttr(resolveEscapesEntities(url)) + '">' + esc(url) + '</a>' });
+          atoms.push({ k: 'h', s: '<a href="' + escAttr(cleanUrl(resolveEscapesEntities(url)) || '') + '">' + esc(url) + '</a>' });
           hasLink = true; i = b + 1 + url.length; continue;
         }
       }
@@ -1109,7 +1122,7 @@ function renderBlocks(blocks, refs, tight = false) {
         out += '<pre><code' + (blk.lang ? ' class="language-' + escAttr(blk.lang) + '"' : '') + '>' + esc(blk.text) + '</code></pre>\n';
         break;
       case 'hr':
-        out += '<hr />\n';
+        out += '<hr>\n';
         break;
       case 'quote':
         out += '<blockquote>\n' + renderBlocks(blk.children, refs) + '</blockquote>\n';
@@ -1120,21 +1133,12 @@ function renderBlocks(blocks, refs, tight = false) {
           const cb = item.task
             ? (item.checked ? '<input checked="" disabled="" type="checkbox">' : '<input disabled="" type="checkbox">')
             : '';
-          if (blk.tight) {
-            let inner = renderBlocks(item.children, refs, true);
-            if (cb) {
-              if (inner.startsWith('<p>')) inner = '<p>' + cb + inner.slice(3);
-              else inner = cb + inner;
-            }
-            out += '<li>' + inner + '</li>\n';
-          } else {
-            let inner = renderBlocks(item.children, refs, false);
-            if (cb) {
-              if (inner.startsWith('<p>')) inner = '<p>' + cb + inner.slice(3);
-              else inner = cb + inner;
-            }
-            out += '<li>\n' + inner + '</li>\n';
+          let inner = renderBlocks(item.children, refs, blk.tight);
+          if (cb) {
+            if (inner.startsWith('<p>')) inner = '<p>' + cb + inner.slice(3);
+            else inner = cb + inner;
           }
+          out += '<li>' + inner + '</li>\n';
         }
         out += blk.ordered ? '</ol>\n' : '</ul>\n';
         break;
