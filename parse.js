@@ -52,7 +52,8 @@ function esc(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function escAttr(s) {
-  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // an & that starts a named/numeric entity reference is left alone (cm-032/033/034)
+  return s.replace(/&(?![A-Za-z][A-Za-z0-9]{1,31};|#[0-9]+;|#[xX][0-9a-fA-F]+;)/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 // decode one entity body (without & and ;): returns string or null
 function decodeEntity(body) {
@@ -79,7 +80,7 @@ function resolveEntities(s) {
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (c === '&') {
-      const m = /^#(?:[xX][0-9a-fA-F]+|[0-9]+)|[A-Za-z][A-Za-z0-9]{1,31}/.exec(s.slice(i + 1));
+      const m = /^#(?:[xX][0-9a-fA-F]+|[0-9]+)/.exec(s.slice(i + 1));
       if (m && s[i + 1 + m[0].length] === ';') {
         const d = decodeEntity(m[0]);
         if (d !== null) { out += d; i += m[0].length + 1; continue; }
@@ -97,7 +98,8 @@ function resolveEscapesEntities(s) {
     const c = s[i];
     if (c === '\\' && i + 1 < s.length && /[!-/:-@\[-`{-~]/.test(s[i + 1])) { out += s[i + 1]; i++; continue; }
     if (c === '&') {
-      const m = /^#(?:[xX][0-9a-fA-F]+|[0-9]+)|[A-Za-z][A-Za-z0-9]{1,31}/.exec(s.slice(i + 1));
+      // numeric references decode; named references stay verbatim (cm-032/033/034)
+      const m = /^#(?:[xX][0-9a-fA-F]+|[0-9]+)/.exec(s.slice(i + 1));
       if (m && s[i + 1 + m[0].length] === ';') {
         const d = decodeEntity(m[0]);
         if (d !== null) { out += d; i += m[0].length + 1; continue; }
@@ -576,12 +578,18 @@ function inline(s, refs) {
       }
       addText('\n'); i++; continue;
     }
-    // '&' : entity
+    // '&' : entity — numeric references decode, named references pass
+    // through verbatim (cm-025/026/028/030)
     if (c === '&') {
       const m = /^#(?:[xX][0-9a-fA-F]+|[0-9]+)|[A-Za-z][A-Za-z0-9]{1,31}/.exec(s.slice(i + 1));
       if (m && s[i + 1 + m[0].length] === ';') {
-        const d = decodeEntity(m[0]);
-        if (d !== null) { addText(d); i += m[0].length + 2; continue; }
+        if (m[0][0] === '#') {
+          const d = decodeEntity(m[0]);
+          if (d !== null) { addText(d); i += m[0].length + 2; continue; }
+        } else {
+          atoms.push({ k: 'h', s: s.slice(i, i + m[0].length + 2) });
+          i += m[0].length + 2; continue;
+        }
       }
       addText('&'); i++; continue;
     }
@@ -991,7 +999,7 @@ function parseList(lines, i, b, refs, first) {
       // empty (cm-280); the indented line becomes a paragraph of its own
       if (!hasNonBlank && sawBlank) break;
       if (indentOf(l) >= lm.contentCol) { itemLines.push(stripCols(l, lm.contentCol)); hasNonBlank = true; j++; continue; }
-      if (itemLines.length > 0 && isParaLine(itemLines[itemLines.length - 1])) { itemLines[itemLines.length - 1] += '\n' + l.replace(/^[ \t]+/, ''); hasNonBlank = true; j++; continue; }
+      if (itemLines.length > 0 && isParaLine(itemLines[itemLines.length - 1]) && setextUnderline(l) === 0 && (isParaLine(l) || listMarker(l))) { itemLines[itemLines.length - 1] += '\n' + l.replace(/^[ \t]+/, ''); hasNonBlank = true; j++; continue; }
       break;
     }
     // looseness: blank line between two non-blank lines inside the item
@@ -1085,10 +1093,12 @@ function parseBlocks(lines, a, b, refs) {
     const fence = fenceStart(line);
     if (fence) {
       const content = [];
+      const fInd = indentOf(line);
       i++;
       while (i < b) {
         if (isFenceClose(lines[i], fence)) { i++; break; }
-        content.push(lines[i]);
+        if (i === b - 1 && lines[i] === '') break; // trailing end-of-input marker, not content
+        content.push(stripCols(lines[i], fInd));
         i++;
       }
       nodes.push({ t: 'code', lang: fence.info ? resolveEscapesEntities(fence.info).split(/\s+/)[0] : null, text: content.join('\n') + (content.length ? '\n' : '') });
