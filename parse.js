@@ -725,6 +725,10 @@ function htmlBlockStart(line) {
   if (!m) return null;
   const after = s[m[0].length];
   if (after !== undefined && after !== ' ' && after !== '\t' && after !== '>' && !(after === '/' && s[m[0].length + 1] === '>')) return null;
+  // a tag whose text (up to the first >) contains a backtick is not an
+  // HTML block start (marked behaviour, cm-344)
+  const gt = s.indexOf('>');
+  if (gt !== -1 && s.slice(0, gt).includes('`')) return null;
   return { type: BLOCK_TAGS.has(m[1].toLowerCase()) ? 6 : 7 };
 }
 
