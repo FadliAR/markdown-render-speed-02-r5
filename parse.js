@@ -108,7 +108,7 @@ function resolveEscapesEntities(s) {
   return out;
 }
 const PUNCT = /[!-/:-@\[-`{-~]/;
-function isSpace(c) { return c === ' ' || c === '\t' || c === '\n' || c === '\r'; }
+function isSpace(c) { return c !== undefined && /\s/.test(c); }
 function isBlankLine(l) { return /^[ \t]*$/.test(l); }
 // column width of leading whitespace (tab advances to next multiple of 4)
 function indentOf(l) {
@@ -372,7 +372,9 @@ function tryLink(s, b, isImage, refs) {
   const children = inline(text, refs);
   if (!isImage && children.hasLink) return null; // links cannot contain links
   if (isImage) {
-    const alt = escAttr(resolveEscapesEntities(text));
+    // the alt text is the link text rendered to plain text (formatting
+    // stripped, e.g. *bar* becomes bar — cm-573)
+    const alt = inline(text, refs).html.replace(/<[^>]*>/g, '');
     if (href === null) return { html: alt, next: k, isLink: false };
     return {
       html: '<img src="' + escAttr(href) + '" alt="' + alt + '"' +
@@ -451,11 +453,13 @@ function processDelims(atoms) {
       const tag = c.ch === '~' ? 'del' : (use === 2 ? 'strong' : 'em');
       let inner = '';
       for (let k = oi + 1; k < ci; k++) inner += renderAtom(atoms[k]);
+      // a partially-used delimiter run stays a delimiter (with its
+      // original flanking) so it can open/close again — cm-408, cm-464
       const before = [];
-      if (o.n - use > 0) before.push({ k: 't', s: o.ch.repeat(o.n - use) });
+      if (o.n - use > 0) before.push({ k: 'd', ch: o.ch, n: o.n - use, open: o.open, close: o.close });
       before.push({ k: 'h', s: '<' + tag + '>' });
       const after = [{ k: 'h', s: inner }, { k: 'h', s: '</' + tag + '>' }];
-      if (c.n - use > 0) after.push({ k: 't', s: c.ch.repeat(c.n - use) });
+      if (c.n - use > 0) after.push({ k: 'd', ch: c.ch, n: c.n - use, open: c.open, close: c.close });
       atoms.splice(oi, ci - oi + 1, ...before, ...after);
       return processDelims(atoms);
     }
@@ -584,7 +588,7 @@ function inline(s, refs) {
     // extended autolink: www. (lowercase only)
     if (c === 'w' && s.startsWith('www.', i)) {
       const prev = i > 0 ? s[i - 1] : undefined;
-      if (prev === undefined || isSpace(prev) || '*_~('.includes(prev)) {
+      if (prev === undefined || isSpace(prev) || '*_~(<'.includes(prev)) {
         const url = scanExtUrl(s, i);
         if (url.length > 4 && validDomain(urlDomain(url))) {
           atoms.push({ k: 'h', s: '<a href="' + escAttr(cleanUrl('http://' + resolveEntities(url)) || '') + '">' + esc(url) + '</a>' });
@@ -600,7 +604,7 @@ function inline(s, refs) {
       const scheme = s.slice(b + 1, i);
       const prev = b >= 0 ? s[b] : undefined;
       if (/^[A-Za-z][A-Za-z0-9+.-]{1,31}$/.test(scheme) && s.startsWith('//', i + 1) &&
-          (prev === undefined || isSpace(prev) || '*_~('.includes(prev))) {
+          (prev === undefined || isSpace(prev) || '*_~(<'.includes(prev))) {
         const url = scanExtUrl(s, b + 1);
         if (url.length > scheme.length + 3 && validDomain(urlDomain(url.slice(scheme.length + 3)))) {
           const last = atoms[atoms.length - 1];
@@ -620,7 +624,7 @@ function inline(s, refs) {
       while (b >= 0 && /[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(s[b])) b--;
       const local = s.slice(b + 1, i);
       const prev = b >= 0 ? s[b] : undefined;
-      if (local.length > 0 && (prev === undefined || isSpace(prev) || '*_~('.includes(prev)) && prev !== '/') {
+      if (local.length > 0 && (prev === undefined || isSpace(prev) || '*_~(<'.includes(prev)) && prev !== '/') {
         const rest = s.slice(i + 1);
         const dm = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*/.exec(rest);
         if (dm && validDomain(dm[0])) {
