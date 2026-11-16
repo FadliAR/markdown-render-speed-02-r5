@@ -757,14 +757,16 @@ function htmlBlockStart(line) {
   if (!m) return null;
   const after = s[m[0].length];
   if (after !== undefined && after !== ' ' && after !== '\t' && after !== '>' && !(after === '/' && s[m[0].length + 1] === '>')) return null;
-  // the tag must actually close on this line (marked's html rule matches a
-  // complete tag; an unclosed tag such as <a title="a lot is paragraph text)
+  if (BLOCK_TAGS.has(m[1].toLowerCase())) return { type: 6 }; // a block
+  // tag may span lines (cm-153), so no > requirement here
+  // type 7 (any other tag): the tag must close on this line, contain no
+  // backtick (cm-344), and be the last thing on the line — otherwise it is
+  // inline HTML inside a paragraph (cm-168: <del>*foo*</del>)
   const gt = s.indexOf('>');
   if (gt === -1) return null;
-  // a tag whose text (up to the first >) contains a backtick is not an
-  // HTML block start (marked behaviour, cm-344)
   if (s.slice(0, gt).includes('`')) return null;
-  return { type: BLOCK_TAGS.has(m[1].toLowerCase()) ? 6 : 7 };
+  if (!/^[ \t]*$/.test(s.slice(gt + 1))) return null;
+  return { type: 7 };
 }
 
 function fenceStart(line) {
@@ -946,7 +948,7 @@ function collectQuote(lines, i, b) {
     // content column must not become a phantom nested list). The candidate
     // itself must be paragraph continuation text: never a setext underline,
     // fence, heading, hr, quote, or HTML block start.
-    if (sub.length > 0 && isParaLine(sub[sub.length - 1]) && setextUnderline(line) === 0 && (isParaLine(line) || listMarker(line))) { sub[sub.length - 1] += '\n' + line; j++; continue; }
+    if (sub.length > 0 && isParaLine(sub[sub.length - 1]) && setextUnderline(line) === 0 && (isParaLine(line) || listMarker(line))) { sub[sub.length - 1] += '\n' + line.replace(/^[ \t]+/, ''); j++; continue; }
     break;
   }
   return { sub, next: j };
@@ -971,14 +973,21 @@ function parseList(lines, i, b, refs, first) {
     const tm = /^\[([ xX])\]([ \t]|$)/.exec(content);
     if (tm) { task = true; checked = tm[1] !== ' '; content = content.slice(3); }
     const itemLines = [content];
+    let hasNonBlank = content.trim() !== '';
+    let sawBlank = false;
     j++;
     while (j < b) {
       const l = lines[j];
-      if (isBlankLine(l)) { itemLines.push(''); j++; continue; }
+      if (isBlankLine(l)) { itemLines.push(''); sawBlank = true; j++; continue; }
       const nm = listMarker(l);
-      if (nm && nm.ordered === ordered && nm.delim === delim && nm.indent === baseIndent) break;
-      if (indentOf(l) >= lm.contentCol) { itemLines.push(stripCols(l, lm.contentCol)); j++; continue; }
-      if (itemLines.length > 0 && isParaLine(itemLines[itemLines.length - 1])) { itemLines[itemLines.length - 1] += '\n' + l; j++; continue; }
+      // any marker at the list's own indent ends this item (a different
+      // delimiter starts a new list, cm-301)
+      if (nm && nm.indent === baseIndent) break;
+      // an empty item separated from its content by a blank line stays
+      // empty (cm-280); the indented line becomes a paragraph of its own
+      if (!hasNonBlank && sawBlank) break;
+      if (indentOf(l) >= lm.contentCol) { itemLines.push(stripCols(l, lm.contentCol)); hasNonBlank = true; j++; continue; }
+      if (itemLines.length > 0 && isParaLine(itemLines[itemLines.length - 1])) { itemLines[itemLines.length - 1] += '\n' + l.replace(/^[ \t]+/, ''); hasNonBlank = true; j++; continue; }
       break;
     }
     // looseness: blank line between two non-blank lines inside the item
