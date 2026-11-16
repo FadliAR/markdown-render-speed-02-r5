@@ -49,7 +49,7 @@ const ENT = {
 
 // ---------- small helpers ----------
 function esc(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function escAttr(s) {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -230,8 +230,11 @@ function parseTag(s, i) {
     if (s[j] !== '>') return null;
     return { tag: s.slice(i, j + 1), next: j + 1, name, closing };
   }
-  // open tag: attributes
+  // open tag: attributes (each attribute must be preceded by whitespace)
   while (j < s.length) {
+    if (s[j] === '>') return { tag: s.slice(i, j + 1), next: j + 1, name, closing };
+    if (s[j] === '/' && s[j + 1] === '>') return { tag: s.slice(i, j + 2), next: j + 2, name, closing };
+    if (s[j] !== ' ' && s[j] !== '\t' && s[j] !== '\n') return null;
     while (j < s.length && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) j++;
     if (s[j] === '>') return { tag: s.slice(i, j + 1), next: j + 1, name, closing };
     if (s[j] === '/' && s[j + 1] === '>') return { tag: s.slice(i, j + 2), next: j + 2, name, closing };
@@ -561,7 +564,7 @@ function inline(s, refs) {
       addText('&'); i++; continue;
     }
     // extended autolink: www. (lowercase only)
-    if (c === 'w' && s.startsWith('ww.', i)) {
+    if (c === 'w' && s.startsWith('www.', i)) {
       const prev = i > 0 ? s[i - 1] : undefined;
       if (prev === undefined || isSpace(prev) || '*_~('.includes(prev)) {
         const url = scanExtUrl(s, i);
@@ -622,7 +625,7 @@ function inline(s, refs) {
       const ch = s[j];
       if (ch === '\\' || ch === '`' || ch === '<' || ch === '[' || ch === '*' || ch === '_' || ch === '~' || ch === '\n' || ch === '&' || ch === '@' || ch === ':') break;
       if (ch === '!' && s[j + 1] === '[') break;
-      if (ch === 'w' && s.startsWith('ww.', j)) break;
+      if (ch === 'w' && s.startsWith('www.', j)) break;
       j++;
     }
     if (j === i) { addText(s[i]); i++; continue; }
