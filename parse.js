@@ -71,6 +71,24 @@ function decodeEntity(body) {
   const v = ENT[body];
   return v === undefined ? null : v;
 }
+// resolve entities only (no backslash escapes): used for URL destinations,
+// where a backslash is percent-encoded as %5C by cleanUrl instead of being
+// dropped (cm-020)
+function resolveEntities(s) {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '&') {
+      const m = /^#(?:[xX][0-9a-fA-F]+|[0-9]+)|[A-Za-z][A-Za-z0-9]{1,31}/.exec(s.slice(i + 1));
+      if (m && s[i + 1 + m[0].length] === ';') {
+        const d = decodeEntity(m[0]);
+        if (d !== null) { out += d; i += m[0].length + 1; continue; }
+      }
+    }
+    out += c;
+  }
+  return out;
+}
 // resolve backslash escapes + entities in a raw string (used for alt text,
 // link destinations and titles, and inside code-span-free contexts)
 function resolveEscapesEntities(s) {
@@ -490,7 +508,7 @@ function inline(s, refs) {
       const rest = s.slice(i + 1);
       const am = /^([A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*)>/.exec(rest);
       if (am) {
-        const dest = cleanUrl(resolveEscapesEntities(am[1]));
+        const dest = cleanUrl(resolveEntities(am[1]));
         if (dest !== null) {
           atoms.push({ k: 'h', s: '<a href="' + escAttr(dest) + '">' + esc(am[1]) + '</a>' });
           hasLink = true; i += 1 + am[0].length; continue;
@@ -569,7 +587,7 @@ function inline(s, refs) {
       if (prev === undefined || isSpace(prev) || '*_~('.includes(prev)) {
         const url = scanExtUrl(s, i);
         if (url.length > 4 && validDomain(urlDomain(url))) {
-          atoms.push({ k: 'h', s: '<a href="' + escAttr(cleanUrl('http://' + resolveEscapesEntities(url)) || '') + '">' + esc(url) + '</a>' });
+          atoms.push({ k: 'h', s: '<a href="' + escAttr(cleanUrl('http://' + resolveEntities(url)) || '') + '">' + esc(url) + '</a>' });
           hasLink = true; i += url.length; continue;
         }
       }
@@ -590,7 +608,7 @@ function inline(s, refs) {
             last.s = last.s.slice(0, -scheme.length);
             if (last.s === '') atoms.pop();
           } else { addText(':'); i++; continue; }
-          atoms.push({ k: 'h', s: '<a href="' + escAttr(cleanUrl(resolveEscapesEntities(url)) || '') + '">' + esc(url) + '</a>' });
+          atoms.push({ k: 'h', s: '<a href="' + escAttr(cleanUrl(resolveEntities(url)) || '') + '">' + esc(url) + '</a>' });
           hasLink = true; i = b + 1 + url.length; continue;
         }
       }
@@ -739,10 +757,13 @@ function htmlBlockStart(line) {
   if (!m) return null;
   const after = s[m[0].length];
   if (after !== undefined && after !== ' ' && after !== '\t' && after !== '>' && !(after === '/' && s[m[0].length + 1] === '>')) return null;
+  // the tag must actually close on this line (marked's html rule matches a
+  // complete tag; an unclosed tag such as <a title="a lot is paragraph text)
+  const gt = s.indexOf('>');
+  if (gt === -1) return null;
   // a tag whose text (up to the first >) contains a backtick is not an
   // HTML block start (marked behaviour, cm-344)
-  const gt = s.indexOf('>');
-  if (gt !== -1 && s.slice(0, gt).includes('`')) return null;
+  if (s.slice(0, gt).includes('`')) return null;
   return { type: BLOCK_TAGS.has(m[1].toLowerCase()) ? 6 : 7 };
 }
 
@@ -775,7 +796,7 @@ function atxHeading(line) {
   if (/^#+$/.test(text)) text = '';
   else {
     const cm = /[ \t](#+)$/.exec(text);
-    if (cm) text = text.slice(0, cm.index);
+    if (cm) text = text.slice(0, cm.index).replace(/[ \t]+$/, '');
   }
   return { level: m[1].length, text };
 }
@@ -1057,7 +1078,7 @@ function parseBlocks(lines, a, b, refs) {
         content.push(lines[i]);
         i++;
       }
-      nodes.push({ t: 'code', lang: fence.info ? fence.info.split(/\s+/)[0] : null, text: content.join('\n') + (content.length ? '\n' : '') });
+      nodes.push({ t: 'code', lang: fence.info ? resolveEscapesEntities(fence.info).split(/\s+/)[0] : null, text: content.join('\n') + (content.length ? '\n' : '') });
       continue;
     }
     const hb = htmlBlockStart(line);
@@ -1071,7 +1092,7 @@ function parseBlocks(lines, a, b, refs) {
         if (j >= b) j = b - 1;
         const nextLine = lines[j + 1];
         let text = lines.slice(i, j + 1).join('\n');
-        if (nextLine !== undefined && nextLine !== '') text += '\n';
+        if (nextLine !== undefined && (nextLine !== '' || lines.slice(j + 1).every(isBlankLine))) text += '\n';
         nodes.push({ t: 'html', text });
         i = j + 1;
         continue;
@@ -1080,7 +1101,7 @@ function parseBlocks(lines, a, b, refs) {
       while (j < b && !isBlankLine(lines[j])) j++;
       const nextLine = lines[j];
       let text = lines.slice(i, j).join('\n');
-      if (nextLine !== undefined && !isBlankLine(nextLine)) text += '\n';
+      if (nextLine !== undefined && (!isBlankLine(nextLine) || lines.slice(j).every(isBlankLine))) text += '\n';
       nodes.push({ t: 'html', text });
       i = j;
       continue;
