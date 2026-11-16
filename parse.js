@@ -651,24 +651,25 @@ function tryDef(lines, i, refs) {
   if (ind > 3) return -1;
   const s = stripCols(line, ind);
   if (s[0] !== '[') return -1;
-  let j = 1, depth = 0;
-  while (j < s.length) {
-    if (s[j] === '\\' && j + 1 < s.length && PUNCT.test(s[j + 1])) { j += 2; continue; }
-    if (s[j] === '[') depth++;
-    if (s[j] === ']') { if (depth === 0) break; depth--; }
-    j++;
-  }
-  if (j >= s.length || s[j] !== ']' || s[j + 1] !== ':') return -1;
-  const norm = normalizeLabel(s.slice(1, j));
-  if (norm === '' || norm.length > 999) return -1;
-  let joined = s.slice(j + 2);
+  // the label may span lines, so join the following non-blank lines first
+  let joined = s;
   let k = i + 1, count = 1;
   while (k < lines.length && count < 12 && !isBlankLine(lines[k])) {
     joined += '\n' + lines[k];
     count++;
     k++;
   }
-  let p = 0;
+  let j = 1, depth = 0;
+  while (j < joined.length) {
+    if (joined[j] === '\\' && j + 1 < joined.length && PUNCT.test(joined[j + 1])) { j += 2; continue; }
+    if (joined[j] === '[') depth++;
+    if (joined[j] === ']') { if (depth === 0) break; depth--; }
+    j++;
+  }
+  if (j >= joined.length || joined[j] !== ']' || joined[j + 1] !== ':') return -1;
+  const norm = normalizeLabel(joined.slice(1, j));
+  if (norm === '' || norm.length > 999) return -1;
+  let p = j + 2;
   while (p < joined.length && (joined[p] === ' ' || joined[p] === '\t')) p++;
   if (joined[p] === '\n') {
     p++;
@@ -804,7 +805,9 @@ function listMarker(line) {
   if (m) {
     const markerLen = 1;
     if (m[2] === '' && m[3] !== '') return null;
-    if (m[2] === '' && m[3] === '') {
+    if (m[3] === '') {
+      // empty item: the spaces after the marker do not count; content
+      // indent is marker width + 1
       return { ordered: false, delim: m[1], startNum: 0, indent: ind, contentCol: ind + markerLen + 1, content: '' };
     }
     const wsWidth = colWidthFrom(m[2], ind + markerLen);
@@ -815,7 +818,7 @@ function listMarker(line) {
   if (m) {
     const markerLen = m[1].length + 1;
     if (m[3] === '' && m[4] !== '') return null;
-    if (m[3] === '' && m[4] === '') {
+    if (m[4] === '') {
       return { ordered: true, delim: m[2], startNum: parseInt(m[1], 10), indent: ind, contentCol: ind + markerLen + 1, content: '' };
     }
     const wsWidth = colWidthFrom(m[3], ind + markerLen);
@@ -896,7 +899,9 @@ function collectQuote(lines, i, b) {
       j++;
       continue;
     }
-    if (isBlankLine(line)) { sub.push(''); j++; continue; }
+    // a blank line without '>' ends the quote (laziness covers paragraph
+    // continuation lines only, never a blank line)
+    if (isBlankLine(line)) break;
     // lazy continuation: merge into the open paragraph line (a lazy line is
     // paragraph text, never a new block — e.g. a list marker below the
     // content column must not become a phantom nested list)
